@@ -4,6 +4,27 @@ description:
 
 # Changelog
 
+## [2.1.0] - 2026-10-31
+### Added
+-   [JKBMS] 26 new read-only entities per pack, all from values the dynamic frame (0x1620) already carried and the parser already decoded. Existing entities, unique ids, device assignments, names and values are unchanged; a two-pack system goes from 124 to 176 entities.
+    -   `Cell 01 Resistance` ... `Cell 16 Resistance` (mΩ, measurement; unique id `{entry_id}_pack_{pack_id}_cell_{n}_resistance`) from the wire resistances at offset 80. Unit and scale confirmed against a live capture (53 to 122 mΩ).
+    -   `Cell Voltage Average`, `Cell Voltage Min`, `Cell Voltage Max`, `Cell Voltage Delta` (mV, voltage, measurement; unique ids `..._cell_voltage_avg`, `_min`, `_max`, `_diff`). Average and delta are the BMS fields at offsets 74 and 76; min and max come from the pack's own cell list. Per pack, distinct from the existing bank-wide values.
+    -   `Highest Cell`, `Lowest Cell` (1-based cell number, no unit; unique ids `..._cell_voltage_max_index`, `..._cell_voltage_min_index`) from the 0-based cell numbers at offsets 78 and 79.
+    -   `Runtime` (s, duration, total_increasing; unique id `..._run_time`) from the uint32 at offset 194.
+    -   `Charge MOS`, `Discharge MOS`, `Balance MOS` binary sensors (device class running; unique ids `..._charge_mos`, `..._discharge_mos`, `..._balance_mos`) from the observed states at offsets 198 to 200. Read-only; these are not the protection alarms and not the setup frame's enable settings.
+    -   The new entities are created for the JK_PB BMS type only; PACE and TDT entity sets are unchanged.
+-   `tests/`: pytest suite (parser, `get_analog_data()`, entity classes) that runs without Home Assistant installed, on a captured two-pack frame set (`tests/fixtures/`, dynamic and setup frames only, no static frame or serial numbers). Run with `uv run --with pytest python -m pytest`.
+
+### Fixed
+-   [JKBMS] A cell resistance outside 0..1000 mΩ no longer drops every later cell from the list: the slot is kept as `None` (the entity shows unknown) and the following cells stay in place. The list now has one slot per populated cell.
+
+### Findings (no change made)
+-   [JKBMS] On the captured firmware (JK_PB1A16S10P) the probe at offset 254 (`temp_bat3`) always equals the MOS temperature at offset 144, so `Temperature 03` duplicates `Temperature 06` (the MOS temperature) and the battery probes are 01, 02, 04 and 05. The temperature list is left as it is.
+-   [JKBMS] Known issue: thirteen of the shared binary sensors can never turn on with a JK BMS because `get_warning_data()` never fills their keys: Fully Charged Status, Low/High Env Temp Protection, Discharge Low Temp Protection, Sampling Fault, Discharge/Charge MOS Fault, and all six `instruction_state` entities (Heating Switch Active, Charger Available, Reverse Connected Alert, Discharge/Charge Enabled Status, Current Limiter Active). They are left untouched in this release.
+-   [JKBMS] The protocol document lists offsets 200-201 as "User Alarm Value 2", overlapping the Balance MOS byte at 200; the capture (balance MOS 0, bytes 200-201 zero) cannot tell them apart. Header byte 5, documented as reserved, carried the device address (0x00 and 0x05) in the capture.
+
+---------------
+
 ## [2.0.12] - 2026-07-25
 ### Fixed
 -   [JKBMS] Fixed setup frame voltage register parsing for `VolInverterMaxCharge` (Inverter Max Charge Voltage) at offset 38 and `VolFloatCharge` (Float Charge Voltage) at offset 42 (previously misidentified as battery undervoltage/overvoltage protection).

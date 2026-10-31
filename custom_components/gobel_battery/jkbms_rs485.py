@@ -304,17 +304,17 @@ class JKBMS485:
             result['cell_voltages'] = cells
 
         # ---- Cell resistance: int16le at offset 80 (16 cells, mΩ) ----
+        # One slot per populated cell (same count as the cell voltages above).
+        # A value outside 0..1000 mΩ keeps its slot as None, so that cell reads
+        # "unknown" while the later cells stay in place; slots beyond the
+        # populated cells are not emitted.
         cell_resistances = []
-        for i in range(16):
+        for i in range(len(cells)):
             offset = 80 + i * 2
-            if offset + 1 < len(data):
-                raw_mohm = struct.unpack_from('<h', data, offset)[0]
-                if 0 <= raw_mohm <= 1000:
-                    cell_resistances.append(raw_mohm)
-                else:
-                    break
-            else:
+            if offset + 1 >= len(data):
                 break
+            raw_mohm = struct.unpack_from('<h', data, offset)[0]
+            cell_resistances.append(raw_mohm if 0 <= raw_mohm <= 1000 else None)
         if cell_resistances:
             result['cell_resistances'] = cell_resistances
 

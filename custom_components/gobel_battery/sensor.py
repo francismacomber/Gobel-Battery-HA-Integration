@@ -7,6 +7,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, BMS_TYPE_JK_PB
+from .pack_values import find_pack, cell_resistance, cell_voltage_stat, runtime_seconds
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +76,20 @@ SENSOR_METADATA = {
         "state_class": SensorStateClass.MEASUREMENT,
         "icon": "mdi:scale-balance"
     },
+}
+
+# Per-pack telemetry the JK BMS reports in its dynamic frame (read-only).
+# key -> (name, unit, device_class, state_class, icon); the key is also the
+# unique id suffix (`{entry_id}_pack_{pack_id}_{key}`) and, for the cell
+# statistics, the pack dict key read through pack_values.cell_voltage_stat.
+JK_PACK_SENSOR_METADATA = {
+    "cell_voltage_avg": ("Cell Voltage Average", "mV", SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT, "mdi:sine-wave"),
+    "cell_voltage_min": ("Cell Voltage Min", "mV", SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT, "mdi:align-vertical-bottom"),
+    "cell_voltage_max": ("Cell Voltage Max", "mV", SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT, "mdi:align-vertical-top"),
+    "cell_voltage_diff": ("Cell Voltage Delta", "mV", SensorDeviceClass.VOLTAGE, SensorStateClass.MEASUREMENT, "mdi:format-align-middle"),
+    "cell_voltage_max_index": ("Highest Cell", None, None, None, "mdi:arrow-up-bold-box-outline"),
+    "cell_voltage_min_index": ("Lowest Cell", None, None, None, "mdi:arrow-down-bold-box-outline"),
+    "run_time": ("Runtime", "s", SensorDeviceClass.DURATION, SensorStateClass.TOTAL_INCREASING, "mdi:timer-outline"),
 }
 
 async def async_setup_entry(
@@ -161,7 +176,20 @@ async def async_setup_entry(
                 new_entities.append(
                     GobelBatteryTemperatureSensor(coordinator, pack_id, temp_idx)
                 )
-                
+
+            # JK BMS only: per-cell wire resistance, per-pack cell statistics and runtime
+            if coordinator.bms_type == BMS_TYPE_JK_PB:
+                for cell_idx in range(1, num_cells + 1):
+                    new_entities.append(
+                        GobelBatteryCellResistanceSensor(coordinator, pack_id, cell_idx)
+                    )
+                for key, (name, unit, dev_class, state_class, icon) in JK_PACK_SENSOR_METADATA.items():
+                    new_entities.append(
+                        GobelBatteryJKPackSensor(
+                            coordinator, pack_id, key, name, unit, dev_class, state_class, icon
+                        )
+                    )
+
             registered_packs.add(pack_id)
 
         if new_entities:
@@ -439,3 +467,99 @@ class GobelBatteryTemperatureSensor(CoordinatorEntity, SensorEntity):
             return temps[self.temp_index - 1]
 
         return None
+
+class GobelBatteryCellResistanceSensor(CoordinatorEntity, SensorEntity):
+    """Sensor representing the wire resistance of a single cell (JK BMS, mΩ)."""
+
+    def __init__(self, coordinator, pack_id, cell_index):
+        """Initialize cell resistance sensor."""
+        super().__init__(coordinator)
+        self.pack_id = pack_id
+        self.cell_index = cell_index
+        display_pack = pack_id + (0 if coordinator.jk_display_index_start == "00" else 1)
+
+        self._attr_name = f"{coordinator.device_name} Pack {display_pack:02d} Cell {cell_index:02d} Resistance"
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_pack_{pack_id}_cell_{cell_index}_resistance"
+        self._attr_native_unit_of_measurement = "mΩ"
+        self._attr_device_class = None
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_icon = "mdi:omega"
+
+    @property
+    def device_info(self):
+        """Return device info for individual pack child device."""
+        display_pack = self.pack_id + (0 if self.coordinator.jk_display_index_start == "00" else 1)
+        return {
+            "identifiers": {(DOMAIN, f"{self.coordinator.entry.entry_id}_pack_{self.pack_id}")},
+            "name": f"{self.coordinator.device_name} Pack {display_pack:02d}",
+            "via_device": (DOMAIN, f"{self.coordinator.entry.entry_id}_total"),
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        if not super().available:
+            return False
+        data = self.coordinator.data
+        if not data:
+            return False
+        return find_pack(data.get("analog", []), self.pack_id) is not None
+
+    @property
+    def native_value(self):
+        """Return cell wire resistance in mΩ, or None when not reported."""
+        data = self.coordinator.data
+        if not data:
+            return None
+        pack_data = find_pack(data.get("analog", []), self.pack_id)
+        return cell_resistance(pack_data, self.cell_index)
+
+class GobelBatteryJKPackSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for a per-pack JK telemetry value (cell statistics, runtime)."""
+
+    def __init__(self, coordinator, pack_id, key, name, unit, device_class, state_class, icon):
+        """Initialize JK pack telemetry sensor."""
+        super().__init__(coordinator)
+        self.pack_id = pack_id
+        self._key = key
+        display_pack = pack_id + (0 if coordinator.jk_display_index_start == "00" else 1)
+
+        self._attr_name = f"{coordinator.device_name} Pack {display_pack:02d} {name}"
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_pack_{pack_id}_{key}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_state_class = state_class
+        self._attr_icon = icon
+
+    @property
+    def device_info(self):
+        """Return device info for individual pack child device."""
+        display_pack = self.pack_id + (0 if self.coordinator.jk_display_index_start == "00" else 1)
+        return {
+            "identifiers": {(DOMAIN, f"{self.coordinator.entry.entry_id}_pack_{self.pack_id}")},
+            "name": f"{self.coordinator.device_name} Pack {display_pack:02d}",
+            "via_device": (DOMAIN, f"{self.coordinator.entry.entry_id}_total"),
+        }
+
+    @property
+    def available(self) -> bool:
+        """Return True if entity is available."""
+        if not super().available:
+            return False
+        data = self.coordinator.data
+        if not data:
+            return False
+        return find_pack(data.get("analog", []), self.pack_id) is not None
+
+    @property
+    def native_value(self):
+        """Return the telemetry value, or None when the BMS did not report it."""
+        data = self.coordinator.data
+        if not data:
+            return None
+        pack_data = find_pack(data.get("analog", []), self.pack_id)
+        if pack_data is None:
+            return None
+        if self._key == "run_time":
+            return runtime_seconds(pack_data)
+        return cell_voltage_stat(pack_data, self._key)
